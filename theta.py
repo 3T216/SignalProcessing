@@ -1,309 +1,193 @@
-import os
+"""Run the three speech-boundary algorithms and evaluate them by environment."""
+
 import re
+from pathlib import Path
+
 import librosa
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt
 
-# ============================================================
-# CẤU HÌNH
-# ============================================================
 FS_TARGET = 16000
-
-FRAME_DURATION = 0.1  # 100 ms
-HOP_DURATION = 0.01  # 10 ms
-
-AUDIO_DIR = 'audio_data'
-MANUAL_FILE = 'manual_labels.csv'
-RESULT_FILE = 'automatic_results.csv'
+FRAME_DURATION = 0.1
+HOP_DURATION = 0.01
+AUDIO_DIR = Path(__file__).resolve().parent / 'audio_data'
+MANUAL_FILE = Path(__file__).resolve().parent / 'manual_labels.csv'
+OUTPUT_DIR = Path(__file__).resolve().parent / 'results'
 
 
-# ============================================================
-# 1. ĐỌC AUDIO & XỬ LÝ TÍN HIỆU
-# ============================================================
 def load_audio(path, sr=FS_TARGET):
-  audio, fs = librosa.load(path, sr=sr, mono=True)
-  return audio, fs
+    return librosa.load(path, sr=sr, mono=True)
 
 
 def bandpass(audio, fs, low=80, high=4000, order=3):
-  nyq = fs / 2
-  b, a = butter(order, [low / nyq, high / nyq], btype='band')
-  return filtfilt(b, a, audio)
+    b, a = butter(order, [low / (fs / 2), high / (fs / 2)], btype='band')
+    return filtfilt(b, a, audio)
 
 
 def framing(audio, fs):
-  frame_length = int(FRAME_DURATION * fs)
-  hop_length = int(HOP_DURATION * fs)
-
-  frames = []
-  for start in range(0, len(audio) - frame_length + 1, hop_length):
-    frames.append(audio[start : start + frame_length])
-
-  return np.array(frames), frame_length, hop_length
+    frame_length = int(FRAME_DURATION * fs)
+    hop_length = int(HOP_DURATION * fs)
+    frames = [audio[i:i + frame_length]
+              for i in range(0, len(audio) - frame_length + 1, hop_length)]
+    return np.asarray(frames), hop_length
 
 
 def ste(frames):
-  window = np.hamming(frames.shape[1])
-  frames = frames * window
-  energy = np.sum(frames**2, axis=1)
-  return energy
+    return np.sum((frames * np.hamming(frames.shape[1])) ** 2, axis=1)
 
 
 def zcr(frames):
-  return np.mean(np.abs(np.diff(np.sign(frames), axis=1)) > 0, axis=1)
+    return np.mean(np.abs(np.diff(np.sign(frames), axis=1)) > 0, axis=1)
 
 
-# ============================================================
-# 2. CÁC THUẬT TOÁN ĐIỀU KIỆN & CẢI TIẾN THỜI GIAN
-# ============================================================
+def bounds(frames, hop_length, fs):
+    if len(frames) == 0:
+        return 0.0, 0.0
+    return frames[0] * hop_length / fs, frames[-1] * hop_length / fs
 
 
-# --- Thuật toán 1 (Cải tiến): Cho phép truyền khoảng thời gian duration ---
-def detect_speech_algo1_duration(energy, hop_length, fs, duration):
-  n_frames = int(duration * fs / hop_length)
-  n_frames = min(max(1, n_frames), len(energy))
-
-  theta = np.max(energy[:n_frames])
-  speech_frames = np.where(energy > theta)[0]
-
-  if len(speech_frames) == 0:
-    return theta, 0.0, 0.0
-
-  N1 = speech_frames[0] * hop_length / fs
-  N2 = speech_frames[-1] * hop_length / fs
-  return theta, N1, N2
+def detect_algo1(energy, hop, fs, duration):
+    n = min(max(1, int(duration * fs / hop)), len(energy))
+    threshold = np.max(energy[:n])
+    active = np.flatnonzero(energy >= threshold)
+    n1, n2 = bounds(active, hop, fs)
+    return threshold, n1, n2
 
 
-# --- Thuật toán đề xuất 1: Adaptive Statistical Thresholding (Mean + Std) ---
-def detect_speech_algo2(energy, hop_length, fs, duration=0.5, k=3.0):
-  n_frames = int(duration * fs / hop_length)
-  n_frames = min(n_frames, len(energy))
-
-  noise_segment = energy[:n_frames]
-  theta = np.mean(noise_segment) + k * np.std(noise_segment)
-  speech_frames = np.where(energy > theta)[0]
-
-  if len(speech_frames) == 0:
-    return theta, 0.0, 0.0
-
-  N1 = speech_frames[0] * hop_length / fs
-  N2 = speech_frames[-1] * hop_length / fs
-  return theta, N1, N2
+def detect_algo2(energy, hop, fs, duration=0.5, k=3.0):
+    n = min(max(1, int(duration * fs / hop)), len(energy))
+    noise = energy[:n]
+    threshold = np.mean(noise) + k * np.std(noise)
+    n1, n2 = bounds(np.flatnonzero(energy > threshold), hop, fs)
+    return threshold, n1, n2
 
 
-# --- Thuật toán đề xuất 2: Dual-Thresholding (STE + ZCR) ---
-def detect_speech_algo3(energy, frames, hop_length, fs, duration=0.5):
-  n_frames = int(duration * fs / hop_length)
-  n_frames = min(n_frames, len(energy))
-
-  zcr_values = zcr(frames)
-  noise_ste = energy[:n_frames]
-  theta_high = np.mean(noise_ste) + 4 * np.std(noise_ste)
-  theta_low = np.mean(noise_ste) + 1.5 * np.std(noise_ste)
-
-  noise_zcr = zcr_values[:n_frames]
-  zcr_threshold = np.mean(noise_zcr) + 3 * np.std(noise_zcr)
-
-  speech_high = np.where(energy > theta_high)[0]
-
-  if len(speech_high) == 0:
-    return theta_high, 0.0, 0.0
-
-  N1_frame = speech_high[0]
-  while N1_frame > 0 and (
-      energy[N1_frame - 1] > theta_low or zcr_values[N1_frame - 1] > zcr_threshold
-  ):
-    N1_frame -= 1
-
-  N2_frame = speech_high[-1]
-  while N2_frame < len(energy) - 1 and (
-      energy[N2_frame + 1] > theta_low or zcr_values[N2_frame + 1] > zcr_threshold
-  ):
-    N2_frame += 1
-
-  N1 = N1_frame * hop_length / fs
-  N2 = N2_frame * hop_length / fs
-  return theta_high, N1, N2
+def detect_algo3(energy, frames, hop, fs, duration=0.5):
+    n = min(max(1, int(duration * fs / hop)), len(energy))
+    crossings = zcr(frames)
+    noise_energy, noise_zcr = energy[:n], crossings[:n]
+    mean_energy, std_energy = np.mean(noise_energy), np.std(noise_energy)
+    high = mean_energy + 4 * std_energy
+    low = mean_energy + 1.5 * std_energy
+    zcr_threshold = np.mean(noise_zcr) + 3 * np.std(noise_zcr)
+    active = np.flatnonzero(energy > high)
+    if len(active) == 0:
+        return high, 0.0, 0.0
+    start, end = int(active[0]), int(active[-1])
+    while start > 0 and (energy[start - 1] > low or crossings[start - 1] > zcr_threshold):
+        start -= 1
+    while end < len(energy) - 1 and (energy[end + 1] > low or crossings[end + 1] > zcr_threshold):
+        end += 1
+    n1, n2 = bounds([start, end], hop, fs)
+    return high, n1, n2
 
 
-# ============================================================
-# 3. XỬ LÝ FILE AUDIO
-# ============================================================
-def process_file_data(file_path):
-  audio, fs = load_audio(file_path)
-  audio = bandpass(audio, fs)
-  frames, frame_length, hop_length = framing(audio, fs)
-  energy = ste(frames)
-
-  return {
-      'file': os.path.basename(file_path),
-      'energy': energy,
-      'frames': frames,
-      'hop_length': hop_length,
-      'fs': fs,
-  }
+def process_file(path):
+    audio, fs = load_audio(path)
+    audio = bandpass(audio, fs)
+    frames, hop = framing(audio, fs)
+    if len(frames) == 0:
+        raise ValueError(f'Audio is shorter than one frame: {path}')
+    return {'file': path.name, 'environment': path.parent.name,
+            'energy': ste(frames), 'frames': frames, 'hop': hop, 'fs': fs}
 
 
-# ============================================================
-# 4. MAIN PROGRAM & GRID SEARCH CHỌN MỐC TỐT NHẤT
-# ============================================================
+def mse_table(predictions, manual):
+    merged = predictions.merge(manual, on='file_clean', suffixes=('', '_manual'))
+    if merged.empty:
+        raise ValueError('No audio filenames match rows in manual_labels.csv')
+    rows = []
+    for algo in (1, 2, 3):
+        values = {}
+        for field in ('theta', 'N1', 'N2'):
+            values[f'mse_{field}'] = float(np.mean(
+                (merged[f'{field}_algo{algo}'] - merged[field]) ** 2))
+        values.update(algorithm=f'algo{algo}', total_mse=sum(values.values()),
+                      matched_files=len(merged))
+        rows.append(values)
+    return merged, pd.DataFrame(rows)
+
+
+def safe_name(name):
+    return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_') or 'environment'
+
+
+def main():
+    files = sorted(AUDIO_DIR.rglob('*.wav'), key=lambda p: (p.parent.name.lower(),
+                   [int(x) if x.isdigit() else x.lower() for x in re.split(r'(\d+)', p.name)]))
+    if not files:
+        raise SystemExit(f'No WAV files found under {AUDIO_DIR}')
+    if not MANUAL_FILE.exists():
+        raise SystemExit(f'Missing manual labels: {MANUAL_FILE}')
+
+    manual = pd.read_csv(MANUAL_FILE)
+    required = {'file', 'theta', 'N1', 'N2'}
+    if not required.issubset(manual.columns):
+        raise SystemExit(f'manual_labels.csv must contain: {", ".join(sorted(required))}')
+    manual['file_clean'] = manual['file'].astype(str).str.strip().str.lower()
+    data = [process_file(path) for path in files]
+    groups = {}
+    for item in data:
+        groups.setdefault(item['environment'], []).append(item)
+
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    all_rows, all_mse = [], []
+    durations = np.round(np.linspace(0.1, 1.0, 10), 2)
+    for environment, group in sorted(groups.items()):
+        records = []
+        for item in group:
+            records.append({'file': item['file'], 'file_clean': item['file'].lower(),
+                            'environment': environment, 'data': item})
+        group_manual = manual[manual['file_clean'].isin(
+            [r['file_clean'] for r in records])]
+        available = {r['file_clean'] for r in records} & set(group_manual['file_clean'])
+        if not available:
+            print(f'Skip {environment}: no matching manual labels')
+            continue
+
+        best_duration, best_mse = None, float('inf')
+        for duration in durations:
+            pred = []
+            for record in records:
+                item = record['data']
+                th, n1, n2 = detect_algo1(item['energy'], item['hop'], item['fs'], duration)
+                pred.append({'file_clean': record['file_clean'], 'theta_algo1': th,
+                             'N1_algo1': n1, 'N2_algo1': n2})
+            joined = pd.DataFrame(pred).merge(group_manual, on='file_clean')
+            score = sum(np.mean((joined[f'{field}_algo1'] - joined[field]) ** 2)
+                        for field in ('theta', 'N1', 'N2'))
+            if score < best_mse:
+                best_duration, best_mse = float(duration), float(score)
+
+        predictions = []
+        for record in records:
+            item = record['data']
+            th1, n1_1, n2_1 = detect_algo1(item['energy'], item['hop'], item['fs'], best_duration)
+            th2, n1_2, n2_2 = detect_algo2(item['energy'], item['hop'], item['fs'])
+            th3, n1_3, n2_3 = detect_algo3(item['energy'], item['frames'], item['hop'], item['fs'])
+            predictions.append({'file': item['file'], 'environment': environment,
+                'theta_algo1': th1, 'N1_algo1': n1_1, 'N2_algo1': n2_1,
+                'theta_algo2': th2, 'N1_algo2': n1_2, 'N2_algo2': n2_2,
+                'theta_algo3': th3, 'N1_algo3': n1_3, 'N2_algo3': n2_3})
+        pred_df = pd.DataFrame(predictions)
+        pred_df['file_clean'] = pred_df['file'].str.lower()
+        merged, summary = mse_table(pred_df, group_manual)
+        summary.insert(0, 'environment', environment)
+        summary['algo1_best_duration_s'] = best_duration
+        merged.drop(columns='file_clean').to_csv(OUTPUT_DIR / f'{safe_name(environment)}_results.csv', index=False)
+        summary.to_csv(OUTPUT_DIR / f'{safe_name(environment)}_mse.csv', index=False)
+        all_rows.append(merged)
+        all_mse.append(summary)
+        print(f'{environment}: {len(merged)} matched files; algo1 duration={best_duration:.1f}s')
+        print(summary[['algorithm', 'mse_theta', 'mse_N1', 'mse_N2', 'total_mse']].to_string(index=False))
+
+    if all_rows:
+        pd.concat(all_rows, ignore_index=True).drop(columns='file_clean').to_csv(
+            OUTPUT_DIR / 'automatic_results.csv', index=False)
+        pd.concat(all_mse, ignore_index=True).to_csv(OUTPUT_DIR / 'mse_by_environment.csv', index=False)
+        print(f'\nSaved per-environment tables and combined output in {OUTPUT_DIR}')
+
+
 if __name__ == '__main__':
-  files = [
-      os.path.join(AUDIO_DIR, f)
-      for f in os.listdir(AUDIO_DIR)
-      if f.lower().endswith('.wav')
-  ]
-
-  def natural_sort_key(s):
-    filename = os.path.basename(s)
-    return [
-        int(text) if text.isdigit() else text.lower()
-        for text in re.split(r'(\d+)', filename)
-    ]
-
-  files.sort(key=natural_sort_key)
-  print(f'Tìm thấy {len(files)} file WAV trong thư mục.\n')
-
-  # Đọc trước toàn bộ dữ liệu tín hiệu của các file
-  file_data_list = [process_file_data(fp) for fp in files]
-
-  if not os.path.exists(MANUAL_FILE):
-    print(
-        f'Không tìm thấy file {MANUAL_FILE} để chạy tìm mốc thời gian tối ưu!'
-    )
-    exit()
-
-  df_manual = pd.read_csv(MANUAL_FILE)
-  df_manual['file_clean'] = (
-      df_manual['file'].astype(str).str.strip().str.lower()
-  )
-
-  # --------------------------------------------------------
-  # TÌM MỐC THỜI GIAN TỐI ƯU CHO THUẬT TOÁN 1 (0.1s -> 1.0s)
-  # --------------------------------------------------------
-  durations = np.linspace(0.1, 1.0, 10)  # 10 mốc: 0.1, 0.2, ..., 1.0 giây
-  best_duration = None
-  best_total_mse = float('inf')
-  grid_search_results = []
-
-  print('=' * 65)
-  print('ĐANG QUÉT TÌM MỐC THỜI GIAN TỐI ƯU CHO THUẬT TOÁN 1 (0.1s -> 1.0s)...')
-  print('=' * 65)
-
-  for dur in durations:
-    dur = round(dur, 2)
-    records = []
-    for data in file_data_list:
-      th, n1, n2 = detect_speech_algo1_duration(
-          data['energy'], data['hop_length'], data['fs'], duration=dur
-      )
-      records.append(
-          {'file': data['file'], 'theta_algo1': th, 'N1_algo1': n1, 'N2_algo1': n2}
-      )
-
-    df_dur = pd.DataFrame(records)
-    df_dur['file_clean'] = df_dur['file'].astype(str).str.strip().str.lower()
-    df_merged = pd.merge(df_dur, df_manual, on='file_clean')
-
-    # Tính MSE cho mốc hiện tại
-    mse_theta = np.mean((df_merged['theta_algo1'] - df_merged['theta']) ** 2)
-    mse_n1 = np.mean((df_merged['N1_algo1'] - df_merged['N1']) ** 2)
-    mse_n2 = np.mean((df_merged['N2_algo1'] - df_merged['N2']) ** 2)
-    total_mse = mse_theta + mse_n1 + mse_n2
-
-    grid_search_results.append({
-        'duration': dur,
-        'mse_theta': mse_theta,
-        'mse_n1': mse_n1,
-        'mse_n2': mse_n2,
-        'total_mse': total_mse,
-    })
-
-    print(
-        f'► Mốc {dur:.1f}s | MSE theta: {mse_theta:.6f} | MSE N1: {mse_n1:.6f} |'
-        f' MSE N2: {mse_n2:.6f} => Tổng MSE: {total_mse:.6f}'
-    )
-
-    if total_mse < best_total_mse:
-      best_total_mse = total_mse
-      best_duration = dur
-
-  print('-' * 65)
-  print(
-      f'🏆 MỐC THỜI GIAN TỐI ƯU NHẤT: {best_duration}s (Tổng MSE nhỏ nhất:'
-      f' {best_total_mse:.6f})'
-  )
-  print('=' * 65 + '\n')
-
-  # --------------------------------------------------------
-  # TÍNH KẾT QUẢ CUỐI CÙNG CHO CẢ 3 THUẬT TOÁN
-  # --------------------------------------------------------
-  final_results = []
-  for data in file_data_list:
-    # Thuật toán 1 dùng mốc thời gian tối ưu vừa tìm được
-    th1, n1_1, n2_1 = detect_speech_algo1_duration(
-        data['energy'],
-        data['hop_length'],
-        data['fs'],
-        duration=best_duration,
-    )
-    th2, n1_2, n2_2 = detect_speech_algo2(
-        data['energy'], data['hop_length'], data['fs']
-    )
-    th3, n1_3, n2_3 = detect_speech_algo3(
-        data['energy'], data['frames'], data['hop_length'], data['fs']
-    )
-
-    final_results.append({
-        'file': data['file'],
-        'theta_algo1': th1,
-        'N1_algo1': n1_1,
-        'N2_algo1': n2_1,
-        'theta_algo2': th2,
-        'N1_algo2': n1_2,
-        'N2_algo2': n2_2,
-        'theta_algo3': th3,
-        'N1_algo3': n1_3,
-        'N2_algo3': n2_3,
-    })
-
-  df_auto = pd.DataFrame(final_results)
-  df_auto['file_clean'] = (
-      df_auto['file'].astype(str).str.strip().str.lower()
-  )
-  df_merged = pd.merge(
-      df_auto, df_manual, on='file_clean', suffixes=('', '_manual')
-  )
-
-  print('=' * 65)
-  print(f'BẢNG SO SÁNH MSE CUỐI CÙNG (Số file trùng khớp: {len(df_merged)}):')
-  print('=' * 65)
-
-  for algo_id, algo_name in [
-      (
-          '1',
-          f'Thuật toán 1 (Max Energy - Tối ưu ở mốc {best_duration}s)',
-      ),
-      ('2', 'Thuật toán 2 (Adaptive Mean+Std - Đề xuất 1)'),
-      ('3', 'Thuật toán 3 (Dual-Threshold STE+ZCR - Đề xuất 2)'),
-  ]:
-    mse_theta = np.mean(
-        (df_merged[f'theta_algo{algo_id}'] - df_merged['theta']) ** 2
-    )
-    mse_n1 = np.mean(
-        (df_merged[f'N1_algo{algo_id}'] - df_merged['N1']) ** 2
-    )
-    mse_n2 = np.mean(
-        (df_merged[f'N2_algo{algo_id}'] - df_merged['N2']) ** 2
-    )
-
-    print(f'► {algo_name}:')
-    print(f'   - MSE (theta) : {mse_theta:.8f}')
-    print(f'   - MSE (N1)    : {mse_n1:.6f}')
-    print(f'   - MSE (N2)    : {mse_n2:.6f}')
-    print('-' * 65)
-
-  df_merged.drop(columns=['file_clean'], inplace=True)
-  df_merged.to_csv(RESULT_FILE, index=False)
-  print(f'Đã xuất bảng kết quả tổng hợp vào: {RESULT_FILE}')
+    main()
