@@ -5,9 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="f143190e-383d-4691-9095-6d2bb832d27d" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/manual_labels.csv" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/automatic_results.csv" beforeDir="false" afterPath="$PROJECT_DIR$/automatic_results.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/manual_labels.csv" beforeDir="false" afterPath="$PROJECT_DIR$/manual_labels.csv" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/theta.py" beforeDir="false" afterPath="$PROJECT_DIR$/theta.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -17,6 +18,13 @@
   </component>
   <component name="EmbeddingIndexingInfo">
     <option name="cachedIndexableFilesCount" value="10" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -48,6 +56,7 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.energy.executor": "Run",
     "Python.test.executor": "Run",
     "Python.theta.executor": "Run",
     "RunOnceActivity.MCP Project settings loaded": "true",
