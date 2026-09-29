@@ -14,7 +14,7 @@ FS_TARGET = 16000
 FRAME_DURATION = 0.1      # 100 ms
 HOP_DURATION = 0.01       # 10 ms
 
-AUDIO_DIR = 'audio/toan'
+AUDIO_DIR = 'audio_data'
 MANUAL_FILE = 'manual_labels.csv'
 RESULT_FILE = 'automatic_results.csv'
 
@@ -194,13 +194,16 @@ if __name__ == '__main__':
     ]
 
     # Sắp xếp theo số trong tên file
-    files.sort(
-        key=lambda x: int(
-            os.path.splitext(
-                os.path.basename(x)
-            )[0]
-        )
-    )
+    import re
+
+    def natural_sort_key(s):
+        filename = os.path.basename(s)
+        # Tách tên file thành danh sách các chuỗi chữ và chuỗi số
+        return [int(text) if text.isdigit() else text.lower()
+                for text in re.split(r'(\d+)', filename)]
+
+
+    files.sort(key=natural_sort_key)
 
     print(f'Tìm thấy {len(files)} file WAV.')
     print()
